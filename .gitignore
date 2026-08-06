@@ -1,0 +1,10 @@
+node_modules/
+.serverless/
+__pycache__/
+*.pyc
+env/
+.env
+.venv/
+.pytest_cache/
+config/local.yml
+.db-uri

@@ -1,0 +1,17 @@
+# base config
+env: production
+stage: production
+region: us-west-2
+deploy_bucket: sls-us-west-2-artifacts-production
+dockerize_pip: non-linux
+
+# App Environment Variables
+env_vars:
+  # Base Vars
+  ENV: ${self:custom.args.env}
+  REGION: ${self:custom.args.region}
+  LOG_LEVEL: 'WARN'
+  DB_NAME: lytebuy-${self:custom.args.env}
+  ALLOWED_ORIGIN: "https://lytebuy.com"
+  # Resolved from AWS Param Store at deploy time, so the Atlas credentials
+  DB_URL: ${ssm:/lytebuy/${self:custom.args.env}/blog-service/db-url}

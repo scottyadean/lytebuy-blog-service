@@ -1,0 +1,36 @@
+# base config
+env: development
+stage: development
+region: us-west-2
+deploy_bucket: lytebuy-serverless-deploy-${self:custom.args.env}-us-west-2
+dockerize_pip: non-linux
+
+
+# Domain Config
+custom_domain:
+  enabled: true
+  domainName: dev-blog.lytebuy.com
+  stage: ${self:custom.args.stage}
+  # basePath: api
+  # Wildcard cert covering lytebuy.com + *.lytebuy.com, DNS-validated against
+  # the Route53 zone so it auto-renews. Must be in the same region as the API
+  # because endpointType is 'regional'; an edge-optimized domain or CloudFront
+  # would need the us-east-1 twin instead:
+  # arn:aws:acm:us-east-1:329104270934:certificate/1b128aa5-602b-4bfb-be54-27d1fc01109a
+  certificateArn: arn:aws:acm:us-west-2:329104270934:certificate/ffbe20a2-569a-495f-91d7-8043454b9a9b
+  createRoute53Record: true
+  createRoute53IPv6Record: true
+  endpointType: 'regional'
+  securityPolicy: tls_1_2
+  apiType: rest
+  autoDomain: true
+
+
+# App Environment Variables
+env_vars:
+  ENV: ${self:custom.args.env}
+  REGION: ${self:custom.args.region}
+  LOG_LEVEL: 'INFO'
+  DB_NAME: lytebuy-${self:custom.args.env}
+  ALLOWED_ORIGIN: "*"
+  DB_URL: ${ssm:/lytebuy/${self:custom.args.env}/blog-service/db-url}

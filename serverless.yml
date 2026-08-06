@@ -1,0 +1,100 @@
+# lytebuy-blog-service
+service: lytebuy-blog-service
+
+custom:
+  stage: ${opt:stage, 'development'}
+  args: ${file(./config/${self:custom.stage}.yml)}
+  pythonRequirements:
+    # dockerizePip cross-compiles native deps in a Linux container
+    dockerizePip: ${self:custom.args.dockerize_pip, true}
+  customDomain: ${file(./config/${self:custom.stage}.yml):custom_domain}
+
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ${self:custom.args.region}
+  stage: ${self:custom.args.stage}
+
+  timeout: 29
+  memorySize: 256
+  logRetentionInDays: 7
+  environment: ${self:custom.args.env_vars}
+  deploymentBucket:
+    name: ${self:custom.args.deploy_bucket}
+  apiGateway:
+    apiKeys:
+      - ${self:custom.args.env}-lytebuy-blog-service-api-key
+
+plugins:
+  - serverless-offline
+  - serverless-python-requirements
+  - serverless-domain-manager
+
+package:
+  patterns:
+    - "src/**"
+    - "!config/**"
+    - "!node_modules/**"
+    - "!tests/**"
+    - "!.venv/**"
+    - "!.serverless/**"
+    - "!.git/**"
+    - "!**/__pycache__/**"
+
+functions:
+  api:
+    handler: src/router.main
+    events:
+      # Public liveness check - no API key.
+      - http:
+          path: /health
+          method: GET
+          private: false
+          cors: true
+
+      # Public reads. The marketing site's blog and press index call these
+      # anonymously, so they must not require a key.
+      - http:
+          path: /posts
+          method: GET
+          private: false
+          cors: true
+      - http:
+          path: /press-releases
+          method: GET
+          private: false
+          cors: true
+
+      # Guarded: single-item reads (they increment the view counter) and all writes.
+      - http:
+          path: /posts/{post_id}
+          method: GET
+          private: true
+          cors: true
+      - http:
+          path: /posts
+          method: POST
+          private: true
+          cors: true
+      - http:
+          path: /posts/{post_id}
+          method: PUT
+          private: true
+          cors: true
+
+      - http:
+          path: /press-releases/{post_id}
+          method: GET
+          private: true
+          cors: true
+      - http:
+          path: /press-releases
+          method: POST
+          private: true
+          cors: true
+      - http:
+          path: /press-releases/{post_id}
+          method: PUT
+          private: true
+          cors: true

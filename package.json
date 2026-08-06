@@ -1,0 +1,17 @@
+{
+  "name": "lytebuy-blog-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lytebuy blog and press release api",
+  "scripts": {
+    "offline": "serverless offline --stage local"
+  },
+  "devDependencies": {
+    "serverless": "^3.38.0",
+    "serverless-offline": "^13.3.3",
+    "serverless-python-requirements": "^6.1.1"
+  },
+  "dependencies": {
+    "serverless-domain-manager": "^10.3.1"
+  }
+}
