@@ -44,6 +44,10 @@ ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 # editorial post from a press release, so both share every read/write path.
 CONTENT_TYPE_POST = "post"
 CONTENT_TYPE_PRESS_RELEASE = "press_release"
+# A featured-vendor spotlight: shares the collection with posts, distinguished by
+# content_type. Carries a vendor_id (a reference into the main API's vendor table),
+# a subject/body, a media list, and a start/end run window.
+CONTENT_TYPE_FEATURED_VENDOR = "featured_vendor"
 CONTENT_TYPES = (CONTENT_TYPE_POST, CONTENT_TYPE_PRESS_RELEASE)
 
 TITLE_MAX = 200
@@ -54,6 +58,12 @@ AUTHOR_MAX = 120
 IMAGE_URL_MAX = 2000
 TAG_MAX = 40
 TAGS_MAX = 12
+
+# Featured-vendor limits.
+SUBJECT_MAX = 200
+VENDOR_ID_MAX = 64
+MEDIA_MAX = 20  # max media items on one feature
+MEDIA_TYPES = ("image", "video")
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 100
@@ -210,6 +220,51 @@ def clean_slug(value):
     return slug, None
 
 
+def clean_media(value):
+    """ validate a list of {type, url} media items, returns (media, error_message).
+
+    None or an omitted field yields an empty list. Each item's type must be one
+    of MEDIA_TYPES (image/video) and url a non-empty string within IMAGE_URL_MAX.
+    """
+    if value is None:
+        return [], None
+    if not isinstance(value, list):
+        return None, "field must be a list of media items"
+    if len(value) > MEDIA_MAX:
+        return None, f"field cannot hold more than {MEDIA_MAX} media items"
+    media = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None, "each media item must be an object"
+        mtype = item.get("type")
+        if mtype not in MEDIA_TYPES:
+            return None, f"media type must be one of {', '.join(MEDIA_TYPES)}"
+        url, message = clean_text(item.get("url"), IMAGE_URL_MAX)
+        if message:
+            return None, f"media url: {message}"
+        media.append({"type": mtype, "url": url})
+    return media, None
+
+
+def parse_iso_datetime(value):
+    """ parse an ISO 8601 string to a tz-aware utc datetime, returns (dt, error).
+
+    None yields (None, None) so callers can treat the field as optional/clearable.
+    A naive string is assumed to be utc.
+    """
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, "must be an ISO 8601 date string"
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None, "must be a valid ISO 8601 date"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc), None
+
+
 def to_object_id(value):
     """ convert a path param to an ObjectId, returns None when malformed """
     # ObjectId(None) mints a brand new random id rather than raising, so a
@@ -266,3 +321,19 @@ def serialize_summary(document):
     summary = serialize_post(document)
     summary.pop("body", None)
     return summary
+
+
+def serialize_featured(document):
+    """ convert a featured-vendor document into the api representation """
+    return {
+        "id": str(document["_id"]),
+        "content_type": document.get("content_type"),
+        "vendor_id": document.get("vendor_id"),
+        "subject": document.get("subject"),
+        "body": document.get("body"),
+        "media": document.get("media") or [],
+        "starts": format_timestamp(document.get("starts")),
+        "ends": format_timestamp(document.get("ends")),
+        "created_date": format_timestamp(document.get("created_date")),
+        "updated_date": format_timestamp(document.get("updated_date")),
+    }

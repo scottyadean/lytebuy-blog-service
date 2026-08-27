@@ -21,6 +21,10 @@ never be read or written through a `/posts` route or vice versa.
 | GET    | `/press-releases/{post_id}`   | yes     | Full body, increments `views`          |
 | POST   | `/press-releases`             | yes     | Create                                 |
 | PUT    | `/press-releases/{post_id}`   | yes     | Partial update                         |
+| GET    | `/featured`                   | no      | The currently-active featured vendor (empty when none) |
+| GET    | `/featured/{feature_id}`      | yes     | One feature by id (admin/preview)      |
+| POST   | `/featured`                   | yes     | Create a featured-vendor spotlight     |
+| PUT    | `/featured/{feature_id}`      | yes     | Partial update                         |
 
 The list endpoints are public because the marketing site's blog and press
 index pages call them anonymously. Everything else is `private: true` in
@@ -60,6 +64,23 @@ is incremented in the same round trip as the single-item read.
 `slug` is unique per content type (compound unique index), so a post and a
 press release may share a slug — they live under different site routes. A
 collision returns `409`.
+
+### Featured vendor (`content_type = featured_vendor`)
+
+A third content type shares the collection, for a home-page vendor spotlight. It
+has its own document shape (no slug/views):
+
+```
+id  content_type  vendor_id  subject  body
+media[]{type: image|video, url}  starts  ends  created_date  updated_date
+```
+
+`vendor_id` is a reference into the main API's vendor table (this service does
+not join it). `starts` defaults to now on create; `ends` is optional
+(open-ended). `GET /featured` returns the single newest feature whose window
+contains "now" (`starts <= now <= ends`, or no `ends`); it returns
+`{items: [], count: 0}` when none is active, which the app treats as "fall back
+to a recently-added vendor" (see LB-2.4).
 
 ## Layout
 

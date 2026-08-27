@@ -98,3 +98,26 @@ functions:
           method: PUT
           private: true
           cors: true
+
+      # Featured vendor spotlight. Public read of the currently-active feature;
+      # writes require the API key.
+      - http:
+          path: /featured
+          method: GET
+          private: false
+          cors: true
+      - http:
+          path: /featured/{feature_id}
+          method: GET
+          private: true
+          cors: true
+      - http:
+          path: /featured
+          method: POST
+          private: true
+          cors: true
+      - http:
+          path: /featured/{feature_id}
+          method: PUT
+          private: true
+          cors: true

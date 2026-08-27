@@ -40,6 +40,12 @@ ROUTES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("GET", "/press-releases/{post_id}"): ("src.posts", "get_press_release"),
     ("POST", "/press-releases"): ("src.posts", "create_press_release"),
     ("PUT", "/press-releases/{post_id}"): ("src.posts", "update_press_release"),
+
+    # featured vendor spotlight - same collection, content_type = featured_vendor
+    ("GET", "/featured"): ("src.featured", "list_featured"),            # public: active feature
+    ("GET", "/featured/{feature_id}"): ("src.featured", "get_featured"),
+    ("POST", "/featured"): ("src.featured", "create_featured"),
+    ("PUT", "/featured/{feature_id}"): ("src.featured", "update_featured"),
 }
 
 
