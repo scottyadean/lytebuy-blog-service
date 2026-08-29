@@ -1,26 +1,13 @@
-""" Handler tests backed by an in-memory mongo """
+""" Handler tests backed by moto's in-process S3 (see tests/conftest.py) """
 import json
 
-import mongomock
 import pytest
 
-from src import posts, router, utils
+from src import posts, router, storage
 
-
-@pytest.fixture(autouse=True)
-def collection(monkeypatch):
-    """ point the handlers at an in-memory collection """
-    client = mongomock.MongoClient()
-    posts_collection = client["blog"]["posts"]
-    # The real unique index lives in utils._ensure_indexes, which is bypassed
-    # when get_posts_collection is patched out. Recreate it here so the
-    # DuplicateKeyError path is actually exercised rather than assumed.
-    posts_collection.create_index(
-        [("content_type", 1), ("slug", 1)], unique=True, name="uq_type_slug"
-    )
-    monkeypatch.setattr(utils, "get_posts_collection", lambda: posts_collection)
-    monkeypatch.setattr(posts, "get_posts_collection", lambda: posts_collection)
-    return posts_collection
+# A valid-but-absent uuid for 404 tests, and a clearly-malformed one for 400s.
+MISSING_ID = "5f2b1c8e-9d4a-4b2c-9e0f-9a8b7c6d5e4f"
+BAD_ID = "nope"
 
 
 def body(result):
@@ -52,7 +39,7 @@ def create_press(title="Lytebuy launches", slug="lytebuy-launches", **overrides)
 # create
 
 
-def test_create_returns_the_stored_post(collection):
+def test_create_returns_the_stored_post():
     result = create()
 
     assert result["statusCode"] == 201
@@ -64,7 +51,7 @@ def test_create_returns_the_stored_post(collection):
     assert payload["created_date"]
     assert payload["updated_date"]
     assert payload["id"]
-    assert collection.count_documents({}) == 1
+    assert len(storage.list_prefix("post")) == 1
 
 
 def test_create_trims_and_lowercases():
@@ -191,33 +178,60 @@ def test_list_is_empty_when_nothing_exists():
 # get and the view counter
 
 
-def test_get_returns_the_full_post_and_counts_a_view():
+def test_get_returns_the_full_post_and_does_not_count_a_view():
+    # The read is decoupled from the counter now; a plain GET never bumps it.
     post_id = body(create())["id"]
 
     payload = body(posts.get_post({"pathParameters": {"post_id": post_id}}, None))
     assert payload["body"] == "Why local beats the marketplace giants."
-    assert payload["views"] == 1
+    assert payload["views"] == 0
 
     payload = body(posts.get_post({"pathParameters": {"post_id": post_id}}, None))
-    assert payload["views"] == 2
+    assert payload["views"] == 0
 
 
-def test_list_reflects_counted_views():
+def test_bump_views_increments_the_counter():
     post_id = body(create())["id"]
-    posts.get_post({"pathParameters": {"post_id": post_id}}, None)
+
+    first = body(posts.bump_post_views({"pathParameters": {"post_id": post_id}}, None))
+    assert first == {"views": 1}
+    second = body(posts.bump_post_views({"pathParameters": {"post_id": post_id}}, None))
+    assert second == {"views": 2}
+
+    # A later read reflects the bumped count.
+    assert body(posts.get_post({"pathParameters": {"post_id": post_id}}, None))["views"] == 2
+
+
+def test_list_reflects_bumped_views():
+    post_id = body(create())["id"]
+    posts.bump_post_views({"pathParameters": {"post_id": post_id}}, None)
 
     assert body(posts.list_posts({}, None))["items"][0]["views"] == 1
 
 
+def test_bump_views_rejects_a_malformed_id():
+    result = posts.bump_post_views({"pathParameters": {"post_id": BAD_ID}}, None)
+    assert result["statusCode"] == 400
+
+
+def test_bump_views_404s_for_an_unknown_id():
+    result = posts.bump_post_views({"pathParameters": {"post_id": MISSING_ID}}, None)
+    assert result["statusCode"] == 404
+
+
+def test_a_post_view_cannot_be_bumped_through_the_press_release_route():
+    post_id = body(create())["id"]
+    result = posts.bump_press_release_views({"pathParameters": {"post_id": post_id}}, None)
+    assert result["statusCode"] == 404
+
+
 def test_get_rejects_a_malformed_id():
-    result = posts.get_post({"pathParameters": {"post_id": "nope"}}, None)
+    result = posts.get_post({"pathParameters": {"post_id": BAD_ID}}, None)
     assert result["statusCode"] == 400
 
 
 def test_get_404s_for_an_unknown_id():
-    result = posts.get_post(
-        {"pathParameters": {"post_id": "5f2b1c8e9d4a3b2c1e0f9a8b"}}, None
-    )
+    result = posts.get_post({"pathParameters": {"post_id": MISSING_ID}}, None)
     assert result["statusCode"] == 404
 
 
@@ -254,14 +268,15 @@ def test_update_can_clear_an_optional_field():
 
 def test_update_does_not_reset_the_view_counter():
     post_id = body(create())["id"]
-    posts.get_post({"pathParameters": {"post_id": post_id}}, None)
+    posts.bump_post_views({"pathParameters": {"post_id": post_id}}, None)
 
     payload = body(posts.update_post(
         {"pathParameters": {"post_id": post_id},
          "body": json.dumps({"title": "Renamed", "views": 999})},
         None,
     ))
-    # views is not a caller-writable field; the counter keeps its real value
+    # views lives in object metadata, so rewriting the body preserves it; and it
+    # is not a caller-writable field, so the 999 is ignored.
     assert payload["views"] == 1
 
 
@@ -286,7 +301,7 @@ def test_update_rejects_a_duplicate_slug():
 
 def test_update_404s_for_an_unknown_id():
     result = posts.update_post(
-        {"pathParameters": {"post_id": "5f2b1c8e9d4a3b2c1e0f9a8b"},
+        {"pathParameters": {"post_id": MISSING_ID},
          "body": json.dumps({"title": "Renamed"})},
         None,
     )
@@ -352,6 +367,14 @@ def test_router_extracts_path_params():
 def test_router_tolerates_a_trailing_slash():
     result = router.main({"httpMethod": "GET", "path": "/posts/"}, None)
     assert result["statusCode"] == 200
+
+
+def test_router_dispatches_the_view_bump_without_colliding_with_get():
+    post_id = body(create())["id"]
+    # /posts/{id}/views (3 segments) must not be swallowed by /posts/{id} (2).
+    result = router.main({"httpMethod": "POST", "path": f"/posts/{post_id}/views"}, None)
+    assert result["statusCode"] == 200
+    assert body(result) == {"views": 1}
 
 
 def test_router_404s_on_an_unknown_path():

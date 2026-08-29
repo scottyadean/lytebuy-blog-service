@@ -4,6 +4,8 @@ stage: development
 region: us-west-2
 deploy_bucket: lytebuy-serverless-deploy-${self:custom.args.env}-us-west-2
 dockerize_pip: non-linux
+# Storage bucket holding the blog JSON objects. Globally unique per stage.
+bucket_name: lytebuy-blog-${self:custom.args.env}-us-west-2
 
 
 # Domain Config
@@ -31,6 +33,5 @@ env_vars:
   ENV: ${self:custom.args.env}
   REGION: ${self:custom.args.region}
   LOG_LEVEL: 'INFO'
-  DB_NAME: lytebuy-${self:custom.args.env}
   ALLOWED_ORIGIN: "*"
-  DB_URL: ${ssm:/lytebuy/${self:custom.args.env}/blog-service/db-url}
+  BUCKET_NAME: ${self:custom.args.bucket_name}

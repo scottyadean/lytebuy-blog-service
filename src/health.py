@@ -1,21 +1,23 @@
 """ Liveness check """
 import os
 
-from pymongo.errors import PyMongoError
+from botocore.exceptions import BotoCoreError, ClientError
 
-from src.utils import get_client, response
+from src.storage import BUCKET, get_s3_client
+from src.utils import response
 
 
 def health(_event, _context):
     """ GET /health - public
 
-    Pings mongo so an uptime monitor sees a red service when the database is
-    unreachable, rather than a green one that 503s on every real request.
+    head_bucket the storage bucket so an uptime monitor sees a red service when
+    the backend is unreachable, rather than a green one that 503s on every real
+    request. The body key stays named "database" so existing monitors keep working.
     """
     database = "ok"
     try:
-        get_client().admin.command("ping")
-    except (PyMongoError, RuntimeError) as err:
+        get_s3_client().head_bucket(Bucket=BUCKET)
+    except (ClientError, BotoCoreError, RuntimeError) as err:
         database = f"unavailable: {err}"
 
     return response(200 if database == "ok" else 503, {

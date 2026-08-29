@@ -25,6 +25,22 @@ provider:
   apiGateway:
     apiKeys:
       - ${self:custom.args.env}-lytebuy-blog-service-api-key
+  # The Lambda is the only reader/writer of the blog bucket. GetObject/PutObject
+  # (PutObject also covers copy_object onto self for the view-count bump) and
+  # DeleteObject on the objects; ListBucket on the bucket for list + head_bucket.
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+          Resource: "arn:aws:s3:::${self:custom.args.bucket_name}/*"
+        - Effect: Allow
+          Action:
+            - s3:ListBucket
+          Resource: "arn:aws:s3:::${self:custom.args.bucket_name}"
 
 plugins:
   - serverless-offline
@@ -66,11 +82,12 @@ functions:
           private: false
           cors: true
 
-      # Guarded: single-item reads (they increment the view counter) and all writes.
+      # Public single-item reads. They no longer bump the view counter, so like
+      # the list routes they need no key. Writes below stay guarded.
       - http:
           path: /posts/{post_id}
           method: GET
-          private: true
+          private: false
           cors: true
       - http:
           path: /posts
@@ -82,11 +99,17 @@ functions:
           method: PUT
           private: true
           cors: true
+      # Public view-bump: the host app calls this after the post page loads.
+      - http:
+          path: /posts/{post_id}/views
+          method: POST
+          private: false
+          cors: true
 
       - http:
           path: /press-releases/{post_id}
           method: GET
-          private: true
+          private: false
           cors: true
       - http:
           path: /press-releases
@@ -97,6 +120,11 @@ functions:
           path: /press-releases/{post_id}
           method: PUT
           private: true
+          cors: true
+      - http:
+          path: /press-releases/{post_id}/views
+          method: POST
+          private: false
           cors: true
 
       # Featured vendor spotlight. Public read of the currently-active feature;
@@ -121,3 +149,21 @@ functions:
           method: PUT
           private: true
           cors: true
+
+
+# The blog storage bucket, owned by this stack per stage. Not versioned: the
+# view-count bump copies each object onto itself, which would otherwise pile up
+# a new version on every page view. Public access is blocked - the Lambda role is
+# the only reader/writer. A CloudFormation-managed bucket must be empty to delete
+# and will fail to create if the (globally unique) name already exists.
+resources:
+  Resources:
+    BlogBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.args.bucket_name}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true

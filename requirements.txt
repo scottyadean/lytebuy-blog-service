@@ -1,4 +1,4 @@
-pymongo>=4.7,<5.0
-# Required for mongodb+srv:// connection strings. Listed explicitly because
-# pymongo dropped the [srv] extra in 4.17.
-dnspython>=2.6
+# boto3 is preinstalled in the AWS Lambda python runtime, so it is intentionally
+# not pinned here - shipping it in the deploy package would only duplicate the
+# runtime's tested version. It is listed in requirements.development.txt for
+# local runs and tests, which have no Lambda runtime to borrow it from.

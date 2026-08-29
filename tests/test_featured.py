@@ -1,21 +1,11 @@
-""" Featured-vendor handler tests, backed by an in-memory mongo """
+""" Featured-vendor handler tests, backed by moto's in-process S3 (conftest.py) """
 import json
 from datetime import timedelta
 
-import mongomock
-import pytest
-
 from src import featured, utils
 
-
-@pytest.fixture(autouse=True)
-def collection(monkeypatch):
-    """ point the handlers at an in-memory collection """
-    client = mongomock.MongoClient()
-    posts_collection = client["blog"]["posts"]
-    monkeypatch.setattr(utils, "get_posts_collection", lambda: posts_collection)
-    monkeypatch.setattr(featured, "get_posts_collection", lambda: posts_collection)
-    return posts_collection
+# A valid-but-absent uuid for the 404 test.
+MISSING_ID = "5f2b1c8e-9d4a-4b2c-9e0f-9a8b7c6d5e4f"
 
 
 def body(result):
@@ -142,6 +132,6 @@ def test_update_partial_does_not_blank_other_fields():
 
 def test_get_missing_is_404():
     result = featured.get_featured(
-        {"pathParameters": {"feature_id": "0" * 24}}, None
+        {"pathParameters": {"feature_id": MISSING_ID}}, None
     )
     assert result["statusCode"] == 404

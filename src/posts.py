@@ -1,15 +1,20 @@
 """ Blog post and press release handlers
 
-Posts and press releases share one collection and one document shape; the
-`content_type` enum is the only thing that separates them. Each handler is
-bound to a content type by the route it is registered under, so a press
-release can never be created or read through a /posts route and vice versa.
+Posts and press releases share one document shape; the `content_type` enum is the
+only thing that separates them, and each is stored under its own S3 key prefix.
+Each handler is bound to a content type by the route it is registered under, so a
+press release can never be created or read through a /posts route and vice versa -
+the prefix in the key makes cross-type access impossible, not just forbidden.
+
+Records are JSON objects in S3. Every field lives in the object body except the
+view counter, which lives in object metadata; a single-item GET no longer counts a
+view. Instead the host app calls POST /{type}/{id}/views after the page loads.
 """
 import logging
 
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from botocore.exceptions import BotoCoreError, ClientError
 
+from src import storage
 from src.utils import (
     AUTHOR_MAX,
     BODY_MAX,
@@ -25,17 +30,30 @@ from src.utils import (
     clean_tags,
     clean_text,
     error,
-    get_posts_collection,
+    format_timestamp,
     parse_body,
     response,
     serialize_post,
     serialize_summary,
-    to_object_id,
     utc_now,
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# S3 errors surface as one of these; a handler turns them into a 503 the same way
+# the mongo-era code turned a PyMongoError into one.
+STORAGE_ERRORS = (ClientError, BotoCoreError)
+
+
+def _to_document(item_id, data, views):
+    """ assemble the mongo-shaped record the serializers expect
+
+    The serializers read `_id` and `views`; the S3 body carries neither (id is the
+    key, views is metadata), so they are merged back in here. Keeping this shape
+    means the serializers - and therefore the api responses - never changed.
+    """
+    return {**data, "_id": item_id, "views": views}
 
 
 def _list(event, content_type):
@@ -58,22 +76,19 @@ def _list(event, content_type):
         return error(400, "offset must be zero or greater")
 
     try:
-        collection = get_posts_collection()
-        query = {"content_type": content_type}
-        # _id breaks ties: two items can land in the same millisecond, and
-        # sorting on created_date alone leaves their order undefined, which
-        # makes paging skip or repeat rows.
-        cursor = (
-            collection.find(query)
-            .sort([("created_date", -1), ("_id", -1)])
-            .skip(offset)
-            .limit(limit)
-        )
-        items = [serialize_summary(document) for document in cursor]
-        total = collection.count_documents(query)
-    except PyMongoError:
+        records = storage.load_all(content_type)
+    except STORAGE_ERRORS:
         logger.exception("failed to list %s", content_type)
-        return error(503, "could not reach the database")
+        return error(503, "could not reach the storage backend")
+
+    # Newest first. created_date is a millisecond-precision utc iso string, so a
+    # string sort is chronological; the id breaks ties for two items written in
+    # the same millisecond, matching the old (created_date, _id) index order.
+    records.sort(key=lambda record: (record[1].get("created_date") or "", record[0]), reverse=True)
+
+    total = len(records)
+    page = records[offset:offset + limit]
+    items = [serialize_summary(_to_document(item_id, data, views)) for item_id, data, views in page]
 
     return response(200, {
         "items": items,
@@ -85,29 +100,26 @@ def _list(event, content_type):
 
 
 def _get(event, content_type):
-    """ fetch a single item and count the view """
+    """ fetch a single item
+
+    No longer counts a view: the read path is decoupled from the counter, which
+    the host app bumps via POST /{type}/{id}/views after the page loads.
+    """
     path_params = event.get("pathParameters") or {}
-    post_id = to_object_id(path_params.get("post_id"))
-    if post_id is None:
+    item_id = path_params.get("post_id")
+    if not storage.is_valid_id(item_id):
         return error(400, "post_id is not a valid id")
 
     try:
-        # Counting the view in the same round trip as the read keeps the two
-        # from drifting apart and avoids a second call on every page load.
-        # $inc creates the field when a pre-counter document lacks it.
-        document = get_posts_collection().find_one_and_update(
-            {"_id": post_id, "content_type": content_type},
-            {"$inc": {"views": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-    except PyMongoError:
+        data, views = storage.get_object(content_type, item_id)
+    except STORAGE_ERRORS:
         logger.exception("failed to fetch %s", content_type)
-        return error(503, "could not reach the database")
+        return error(503, "could not reach the storage backend")
 
-    if document is None:
+    if data is None:
         return error(404, f"{content_type} not found")
 
-    return response(200, serialize_post(document))
+    return response(200, serialize_post(_to_document(item_id, data, views)))
 
 
 def _validate_payload(data, partial=False):
@@ -167,6 +179,22 @@ def _validate_payload(data, partial=False):
     return fields, None
 
 
+def _reject_duplicate_slug(content_type, slug, exclude_id=None):
+    """ return a 409 response if another record already uses slug, else None
+
+    The mongo unique index is gone, so uniqueness is enforced on write by reading
+    the prefix. exclude_id lets an update keep its own slug. There is a tiny race
+    window between two simultaneous creates of the same slug, accepted for an
+    admin-driven blog.
+    """
+    for item_id, data, _views in storage.load_all(content_type):
+        if item_id == exclude_id:
+            continue
+        if data.get("slug") == slug:
+            return error(409, "slug is already in use")
+    return None
+
+
 def _create(event, content_type):
     """ create an item of one content type """
     data, parse_error = parse_body(event)
@@ -177,32 +205,33 @@ def _create(event, content_type):
     if validation_error:
         return error(400, validation_error)
 
-    now = utc_now()
-    document = {
-        **fields,
-        "content_type": content_type,
-        "views": 0,
-        "created_date": now,
-        "updated_date": now,
-    }
-
     try:
-        result = get_posts_collection().insert_one(document)
-    except DuplicateKeyError:
-        return error(409, "slug is already in use")
-    except PyMongoError:
-        logger.exception("failed to insert %s", content_type)
-        return error(503, "could not reach the database")
+        duplicate = _reject_duplicate_slug(content_type, fields["slug"])
+        if duplicate:
+            return duplicate
 
-    document["_id"] = result.inserted_id
-    return response(201, serialize_post(document))
+        now = format_timestamp(utc_now())
+        record = {
+            **fields,
+            "content_type": content_type,
+            "created_date": now,
+            "updated_date": now,
+        }
+        item_id = storage.new_id()
+        # views is not in the body; it starts at 0 in object metadata.
+        storage.put_object(content_type, item_id, record, view_count=0)
+    except STORAGE_ERRORS:
+        logger.exception("failed to insert %s", content_type)
+        return error(503, "could not reach the storage backend")
+
+    return response(201, serialize_post(_to_document(item_id, record, 0)))
 
 
 def _update(event, content_type):
     """ update an item of one content type """
     path_params = event.get("pathParameters") or {}
-    post_id = to_object_id(path_params.get("post_id"))
-    if post_id is None:
+    item_id = path_params.get("post_id")
+    if not storage.is_valid_id(item_id):
         return error(400, "post_id is not a valid id")
 
     data, parse_error = parse_body(event)
@@ -215,26 +244,48 @@ def _update(event, content_type):
     if not fields:
         return error(400, "no updatable fields were supplied")
 
-    # content_type and views are deliberately not updatable: the route owns the
-    # former, and letting a caller set the latter would make the counter a lie.
-    fields["updated_date"] = utc_now()
+    try:
+        existing, views = storage.get_object(content_type, item_id)
+        if existing is None:
+            return error(404, f"{content_type} not found")
+
+        if "slug" in fields and fields["slug"] != existing.get("slug"):
+            duplicate = _reject_duplicate_slug(content_type, fields["slug"], exclude_id=item_id)
+            if duplicate:
+                return duplicate
+
+        # content_type and views are deliberately not updatable: the route owns
+        # the former, and views lives in metadata so a body rewrite never touches
+        # it. Re-put with the existing count to preserve it.
+        record = {**existing, **fields, "updated_date": format_timestamp(utc_now())}
+        storage.put_object(content_type, item_id, record, view_count=views)
+    except STORAGE_ERRORS:
+        logger.exception("failed to update %s", content_type)
+        return error(503, "could not reach the storage backend")
+
+    return response(200, serialize_post(_to_document(item_id, record, views)))
+
+
+def _bump_views(event, content_type):
+    """ increment a record's view counter, returns the new count
+
+    Public and separate from the read so the host app can call it after a page
+    loads without slowing the read or rewriting the article body.
+    """
+    path_params = event.get("pathParameters") or {}
+    item_id = path_params.get("post_id")
+    if not storage.is_valid_id(item_id):
+        return error(400, "post_id is not a valid id")
 
     try:
-        document = get_posts_collection().find_one_and_update(
-            {"_id": post_id, "content_type": content_type},
-            {"$set": fields},
-            return_document=ReturnDocument.AFTER,
-        )
-    except DuplicateKeyError:
-        return error(409, "slug is already in use")
-    except PyMongoError:
-        logger.exception("failed to update %s", content_type)
-        return error(503, "could not reach the database")
-
-    if document is None:
+        new_count = storage.increment_view_count(content_type, item_id)
+    except storage.NotFound:
         return error(404, f"{content_type} not found")
+    except STORAGE_ERRORS:
+        logger.exception("failed to bump views for %s", content_type)
+        return error(503, "could not reach the storage backend")
 
-    return response(200, serialize_post(document))
+    return response(200, {"views": new_count})
 
 
 # Posts
@@ -259,6 +310,11 @@ def update_post(event, _context):
     return _update(event, CONTENT_TYPE_POST)
 
 
+def bump_post_views(event, _context):
+    """ POST /posts/{post_id}/views - public """
+    return _bump_views(event, CONTENT_TYPE_POST)
+
+
 # Press releases
 
 def list_press_releases(event, _context):
@@ -279,3 +335,8 @@ def create_press_release(event, _context):
 def update_press_release(event, _context):
     """ PUT /press-releases/{post_id} """
     return _update(event, CONTENT_TYPE_PRESS_RELEASE)
+
+
+def bump_press_release_views(event, _context):
+    """ POST /press-releases/{post_id}/views - public """
+    return _bump_views(event, CONTENT_TYPE_PRESS_RELEASE)

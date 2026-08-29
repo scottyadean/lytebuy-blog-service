@@ -3,41 +3,15 @@
 Auth is not handled here. API Gateway enforces the x-api-key header from the
 usage plan on every route marked `private: true` in serverless.yml, so a
 request that reaches a handler has already been authorised.
+
+Storage lives in src/storage.py (S3). This module holds the storage-agnostic
+pieces: validation, serialization, response building, and shared constants.
 """
 import json
 import logging
 import os
 from datetime import datetime, timezone
 
-from bson import ObjectId
-from bson.errors import InvalidId
-from pymongo import MongoClient
-from pymongo.server_api import ServerApi
-
-DB_NAME = os.getenv("DB_NAME", "lytebuy-development")
-
-
-# Round brackets, not braces: AWS Param Store rejects any value containing
-# "{{}}", reading it as a nested parameter reference.
-DB_NAME_PLACEHOLDER = "((db_name))"
-
-
-def resolve_uri(uri, db_name):
-    """ substitute the ((db_name)) placeholder in a connection string
-
-    The Atlas connection string is shared across stages and carries the
-    database name in its path. Templating it means one stored secret works for
-    every stage and the stage's own DB_NAME decides which database it actually
-    opens, so a production deploy can never be pointed at the development data
-    by a stale copied URI.
-    """
-    if not uri:
-        return uri
-    return uri.replace(DB_NAME_PLACEHOLDER, db_name)
-
-
-URI = resolve_uri(os.getenv("DB_URL"), DB_NAME)
-COLLECTION = "posts"
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 
 # Content types. One collection, one shape; the enum is what separates an
@@ -49,6 +23,20 @@ CONTENT_TYPE_PRESS_RELEASE = "press_release"
 # a subject/body, a media list, and a start/end run window.
 CONTENT_TYPE_FEATURED_VENDOR = "featured_vendor"
 CONTENT_TYPES = (CONTENT_TYPE_POST, CONTENT_TYPE_PRESS_RELEASE)
+
+# content_type enum -> S3 key prefix. The route path segment ("posts",
+# "press-releases", "featured") and the content_type enum differ, so the mapping
+# is explicit rather than derived. Every record lives at PREFIXES[type] + id + ".json".
+PREFIXES = {
+    CONTENT_TYPE_POST: "posts/",
+    CONTENT_TYPE_PRESS_RELEASE: "press-releases/",
+    CONTENT_TYPE_FEATURED_VENDOR: "featured/",
+}
+
+# The view counter lives in S3 object metadata, not the JSON body, so bumping it
+# never rewrites the article. Stored as x-amz-meta-view-count; S3 lowercases and
+# returns it under this bare key.
+VIEW_COUNT_META_KEY = "view-count"
 
 TITLE_MAX = 200
 SLUG_MAX = 220
@@ -70,61 +58,6 @@ MAX_LIMIT = 100
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-# Cached across warm lambda invocations. Building a MongoClient per request
-# opens a new connection pool every time and exhausts the Atlas connection
-# limit under any real traffic.
-_client = None
-_indexes_ready = False
-
-
-def get_client():
-    """ get a cached mongo client """
-    global _client
-    if _client is None:
-        if not URI:
-            raise RuntimeError("DB_URL is not set")
-        _client = MongoClient(
-            URI,
-            server_api=ServerApi("1"),
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-        )
-    return _client
-
-
-def get_db():
-    """ get the blog database """
-    return get_client()[DB_NAME]
-
-
-def get_posts_collection():
-    """ get the posts collection, shared by posts and press releases """
-    collection = get_db()[COLLECTION]
-    _ensure_indexes(collection)
-    return collection
-
-
-def _ensure_indexes(collection):
-    """ create the collection's indexes once per warm container
-
-    create_index is idempotent, but it is still a round trip, so the flag keeps
-    it off the hot path for every request after the first. The unique index is
-    what makes the DuplicateKeyError handling in the write handlers real: without
-    it, two posts could share a slug and the marketing site's /blog/<slug> route
-    would resolve to whichever one mongo returned first.
-    """
-    global _indexes_ready
-    if _indexes_ready:
-        return
-    # Compound so a post and a press release may share a slug; they live under
-    # different routes on the site and never collide.
-    collection.create_index([("content_type", 1), ("slug", 1)], unique=True, name="uq_type_slug")
-    # Matches the list query's filter + sort exactly.
-    collection.create_index(
-        [("content_type", 1), ("created_date", -1), ("_id", -1)], name="ix_type_created"
-    )
-    _indexes_ready = True
 
 
 def default_headers():
@@ -265,25 +198,16 @@ def parse_iso_datetime(value):
     return dt.astimezone(timezone.utc), None
 
 
-def to_object_id(value):
-    """ convert a path param to an ObjectId, returns None when malformed """
-    # ObjectId(None) mints a brand new random id rather than raising, so a
-    # missing path param has to be rejected before it reaches the constructor.
-    if not value:
-        return None
-    try:
-        return ObjectId(value)
-    except (InvalidId, TypeError):
-        return None
-
-
 def format_timestamp(value):
-    """ render a stored datetime as an unambiguous utc iso string """
+    """ render a stored datetime as an unambiguous utc iso string
+
+    Dates are stored in S3 as ISO strings, so a string passes straight through.
+    A datetime is normalised to utc first: left naive, the browser's Date parser
+    reads a naive iso string as local time and shifts every post by the viewer's
+    utc offset.
+    """
     if not isinstance(value, datetime):
         return value
-    # Mongo stores datetimes as utc but hands them back naive. Left alone, the
-    # browser's Date parser reads a naive iso string as local time and shifts
-    # every post by the viewer's utc offset.
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
@@ -298,7 +222,12 @@ def utc_now():
 
 
 def serialize_post(document):
-    """ convert a mongo document into the api representation """
+    """ convert a stored record into the api representation
+
+    The record is the JSON object body merged with its id and view count:
+    {**data, "_id": id, "views": n}. Building that shape lets the serializer
+    stay identical to the mongo-era one, so the api response never changed.
+    """
     return {
         "id": str(document["_id"]),
         "content_type": document.get("content_type"),
@@ -324,7 +253,7 @@ def serialize_summary(document):
 
 
 def serialize_featured(document):
-    """ convert a featured-vendor document into the api representation """
+    """ convert a featured-vendor record into the api representation """
     return {
         "id": str(document["_id"]),
         "content_type": document.get("content_type"),

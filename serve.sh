@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export AWS_PROFILE=dev-lytebuy;
 echo "Loading any env vars from .env"
 eval "$(
   cat .env | awk '!/^\s*#/' | awk '!/^\s*$/' | while IFS='' read -r line; do

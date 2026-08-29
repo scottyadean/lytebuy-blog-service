@@ -31,15 +31,18 @@ ROUTES: Dict[Tuple[str, str], Tuple[str, str]] = {
 
     # posts
     ("GET", "/posts"): ("src.posts", "list_posts"),                 # public
-    ("GET", "/posts/{post_id}"): ("src.posts", "get_post"),
+    ("GET", "/posts/{post_id}"): ("src.posts", "get_post"),          # public: no longer bumps views
     ("POST", "/posts"): ("src.posts", "create_post"),
     ("PUT", "/posts/{post_id}"): ("src.posts", "update_post"),
+    # public view-bump: the host app calls this after the post page loads
+    ("POST", "/posts/{post_id}/views"): ("src.posts", "bump_post_views"),
 
     # press releases - same model, different content type
     ("GET", "/press-releases"): ("src.posts", "list_press_releases"),   # public
-    ("GET", "/press-releases/{post_id}"): ("src.posts", "get_press_release"),
+    ("GET", "/press-releases/{post_id}"): ("src.posts", "get_press_release"),  # public
     ("POST", "/press-releases"): ("src.posts", "create_press_release"),
     ("PUT", "/press-releases/{post_id}"): ("src.posts", "update_press_release"),
+    ("POST", "/press-releases/{post_id}/views"): ("src.posts", "bump_press_release_views"),
 
     # featured vendor spotlight - same collection, content_type = featured_vendor
     ("GET", "/featured"): ("src.featured", "list_featured"),            # public: active feature
