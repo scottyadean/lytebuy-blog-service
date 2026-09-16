@@ -2,10 +2,37 @@
 env: production
 stage: production
 region: us-west-2
-deploy_bucket: sls-us-west-2-artifacts-production
+# Matches the dev naming pattern and ALREADY EXISTS. The previous value
+# (sls-us-west-2-artifacts-production) had never been created, so the first prod
+# deploy would have failed on a missing bucket.
+deploy_bucket: lytebuy-serverless-deploy-${self:custom.args.env}-us-west-2
 dockerize_pip: non-linux
 # Storage bucket holding the blog JSON objects. Globally unique per stage.
 bucket_name: lytebuy-blog-${self:custom.args.env}-us-west-2
+
+# Domain Config
+#
+# serverless.yml:10 reads custom_domain unconditionally, so this key MUST exist
+# or the deploy fails on an unresolved variable - it is not optional even if you
+# did not want a custom domain.
+#
+# blog.lytebuy.com (dev uses dev-blog). The certificate is the us-west-2 wildcard
+# covering lytebuy.com + *.lytebuy.com - it must be in the SAME region as the API
+# because endpointType is 'regional'. An edge-optimized domain or CloudFront would
+# need the us-east-1 twin instead:
+#   arn:aws:acm:us-east-1:329104270934:certificate/1b128aa5-602b-4bfb-be54-27d1fc01109a
+custom_domain:
+  enabled: true
+  domainName: blog.lytebuy.com
+  stage: ${self:custom.args.stage}
+  certificateArn: arn:aws:acm:us-west-2:329104270934:certificate/ffbe20a2-569a-495f-91d7-8043454b9a9b
+  createRoute53Record: true
+  createRoute53IPv6Record: true
+  endpointType: 'regional'
+  securityPolicy: tls_1_2
+  apiType: rest
+  autoDomain: true
+
 
 # App Environment Variables
 env_vars:
