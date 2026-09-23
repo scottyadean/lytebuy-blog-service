@@ -33,5 +33,8 @@ env_vars:
   ENV: ${self:custom.args.env}
   REGION: ${self:custom.args.region}
   LOG_LEVEL: 'INFO'
-  ALLOWED_ORIGIN: "*"
+  # Dev origins. Kept as a list rather than "*" so development exercises the
+  # same echo path production uses - a "*" here would hide an origin bug until
+  # it reached production, which is exactly what happened before.
+  ALLOWED_ORIGINS: "https://dev-app.lytebuy.com,https://lytebuy.com,http://localhost:3001,http://localhost:8081"
   BUCKET_NAME: ${self:custom.args.bucket_name}

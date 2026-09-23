@@ -12,7 +12,42 @@ import logging
 import os
 from datetime import datetime, timezone
 
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
+# Origins allowed to call this API from a browser, comma-separated.
+#
+# A LIST, NOT ONE VALUE. This was a single origin, so the deployed Lambda sent
+# "Access-Control-Allow-Origin: https://lytebuy.com" to everybody - and the app
+# at https://app.lytebuy.com was blocked, because a browser requires the header
+# to name the ASKING origin exactly.
+#
+# The header cannot be "*" either: Access-Control-Allow-Credentials is true
+# below, and the two are illegal together. So the matching origin is ECHOED
+# BACK per request - the standard pattern - rather than sent as a fixed value.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        os.getenv(
+            # Fall back to the old single-value var so a deploy that has not had
+            # its environment updated keeps working rather than blocking everyone.
+            "ALLOWED_ORIGIN",
+            "https://lytebuy.com,https://www.lytebuy.com,https://app.lytebuy.com",
+        ),
+    ).split(",")
+    if origin.strip()
+]
+
+
+def allowed_origin_for(request_origin):
+    """The value to send in Access-Control-Allow-Origin for this request.
+
+    Echoes the caller's origin when it is on the list, so a browser sees its own
+    origin named back. Falls back to the FIRST allowed origin when the caller is
+    unknown or absent (a server-to-server call, curl, a health check) - which is
+    a value no browser will accept for a different origin, and that is the point.
+    """
+    if request_origin and request_origin in ALLOWED_ORIGINS:
+        return request_origin
+    return ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "*"
 
 # Content types. One collection, one shape; the enum is what separates an
 # editorial post from a press release, so both share every read/write path.
@@ -60,11 +95,16 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
-def default_headers():
-    """ standard crud api response headers """
+def default_headers(request_origin=None):
+    """ standard crud api response headers.
+
+    `request_origin` is the caller's Origin header; pass it so the CORS header
+    names them back. Omitted, the first allowed origin is used - correct for a
+    non-browser caller, which ignores CORS entirely.
+    """
     return {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+        "Access-Control-Allow-Origin": allowed_origin_for(request_origin),
         "Access-Control-Allow-Credentials": True,
         "Access-Control-Allow-Methods": "OPTIONS,POST,GET,PUT,DELETE",
         "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,"

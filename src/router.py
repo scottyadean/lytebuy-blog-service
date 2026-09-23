@@ -16,7 +16,7 @@ import json
 import os
 from typing import Callable, Dict, Optional, Tuple
 
-from src.utils import default_headers
+from src.utils import allowed_origin_for, default_headers
 
 # Strip this prefix from inbound paths before route matching. Set when the
 # API Gateway custom-domain basePath isn't being stripped at the edge.
@@ -76,13 +76,20 @@ def main(event, context):
         elif path.startswith(_BASE_PATH + "/"):
             path = path[len(_BASE_PATH):]
 
+    # The caller's origin, needed to name them back in the CORS header. Header
+    # casing is not guaranteed through API Gateway, so both spellings are read.
+    headers = event.get("headers") or {}
+    request_origin = headers.get("origin") or headers.get("Origin")
+
     # CORS preflight - respond before auth/handler dispatch
     if method == "OPTIONS":
-        return _response(204, "")
+        return _with_cors(_response(204, ""), request_origin)
 
     resolved = _resolve(method, path)
     if resolved is None:
-        return _response(404, {"error": f"Route not found: {method} {path}"})
+        return _with_cors(
+            _response(404, {"error": f"Route not found: {method} {path}"}), request_origin
+        )
 
     target, path_params = resolved
     # The catch-all gives us {"proxy": "posts/<id>"}, so the router is the only
@@ -92,9 +99,28 @@ def main(event, context):
     try:
         handler = _load(*target)
     except (ImportError, AttributeError) as err:
-        return _response(500, {"error": f"Failed to load handler: {err}"})
+        return _with_cors(
+            _response(500, {"error": f"Failed to load handler: {err}"}), request_origin
+        )
 
-    return handler(event, context)
+    # STAMPED HERE, not in each handler. Every handler builds its response
+    # through utils.response(), which has no access to the event - so the one
+    # place that sees both the request and the response is this return.
+    return _with_cors(handler(event, context), request_origin)
+
+
+def _with_cors(result, request_origin):
+    """Name the caller's origin in a response that is already built.
+
+    A browser requires Access-Control-Allow-Origin to match the asking origin
+    exactly - a fixed value serves exactly one site, which is why the app at
+    app.lytebuy.com was blocked while lytebuy.com worked.
+    """
+    if not isinstance(result, dict):
+        return result
+    result.setdefault("headers", {})
+    result["headers"]["Access-Control-Allow-Origin"] = allowed_origin_for(request_origin)
+    return result
 
 
 def _resolve(method: str, path: str) -> Optional[Tuple[Tuple[str, str], Dict[str, str]]]:

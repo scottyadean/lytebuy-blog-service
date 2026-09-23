@@ -40,5 +40,14 @@ env_vars:
   ENV: ${self:custom.args.env}
   REGION: ${self:custom.args.region}
   LOG_LEVEL: 'WARN'
-  ALLOWED_ORIGIN: "https://lytebuy.com"
+  # Origins allowed to call this API from a browser, comma-separated.
+  #
+  # WAS A SINGLE ORIGIN, which is why the app at app.lytebuy.com was blocked:
+  # the Lambda sent "Access-Control-Allow-Origin: https://lytebuy.com" to
+  # everybody, and a browser requires the header to name the ASKING origin.
+  # The handler now echoes whichever of these asked.
+  #
+  # Not "*": Access-Control-Allow-Credentials is true, and the two are illegal
+  # together - a browser would reject every response.
+  ALLOWED_ORIGINS: "https://lytebuy.com,https://www.lytebuy.com,https://app.lytebuy.com"
   BUCKET_NAME: ${self:custom.args.bucket_name}
